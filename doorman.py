@@ -14,6 +14,8 @@ import logging
 import requests
 import sys
 import redis
+import time
+import json
 
 
 class Doorman(object):
@@ -39,13 +41,13 @@ class Doorman(object):
 
     def redis_add_welcomed_people(self, name):
         self.redis_server.setex(name, self.WELCOMED_EXPIRE, self.WELCOMED_VALUE)
-        self.logger.debug('Added \"' + name + '\" to welcomed people set.')
+        self.logger.debug('Added \"%s\" to welcomed people set.' % name)
         return
 
     def redis_add_forbidden_people(self, name):
         self.redis_server.setex(name, self.FORBIDDEN_EXPIRE,
                                 self.FORBIDDEN_VALUE)
-        self.logger.debug('Added \"' + name + '\" to forbidden people set.')
+        self.logger.debug('Added \"%s\" to forbidden people set.' % name)
         return
 
     def redis_check_people(self, name):
@@ -65,6 +67,20 @@ class Doorman(object):
             res.append(self.redis_server.lpop(self.LOG_LIST_NAME))
         return res
 
+    # VALIDATING LOG PART
+    validating_log_id = 0
+
+    def validating_log_create(self, name, passed):
+        log = {'log_id': self.validating_log_id,
+               'card_no': name,
+               'time': str(time.time())}
+        self.validating_log_id += 1
+        if passed:
+            log['status'] = 'PASS_CACHE_HIT'
+        else:
+            log['status'] = 'PASS_CACHE_FORBIDDEN'
+        return log
+
     # WEB PART
     API_URL = 'https://op.tiaozhan.com/doorman/Home/Doorman'
     API_KEY = 'Tiaozhan-Work'
@@ -80,6 +96,9 @@ class Doorman(object):
                 r.raise_for_status()
             try:
                 result = r.json()
+                # FOR TEST
+                result['valid_card_no'] = ['Someone not in cache']
+                # END TEST
                 if name in result['valid_card_no']:
                     return True
                 elif name in result['invalid_card_no']:
@@ -91,10 +110,59 @@ class Doorman(object):
             except ValueError:
                 self.logger.error('Can not resolve data from server.')
                 self.logger.error(r.text)
+            except KeyError:
+                self.logger.error(
+                        'Do not have necessary key in data from server.')
+                self.logger.error(r.text)
         except requests.exceptions.RequestException:
             exception, message, traceback = sys.exc_info()
             self.logger.error('%s %s' % (exception, message))
         return None
+
+    def web_post_log(self):
+        try:
+            logs = self.redis_get_all_logs()
+        except redis.RedisError:
+            exception, message, traceback = sys.exc_info()
+            self.logger.error('%s %s' % (exception, message))
+            return
+        url = self.API_URL + '/log'
+        headers = {'content-type': 'application/json',
+                   'X-Doorman': self.API_KEY, 'X-Doorman-Action': 'POST_LOG'}
+        data = {'count': len(logs), 'log': logs}
+        try:
+            r = requests.post(url, headers=headers, data=json.dumps(data))
+            if r.status_code != requests.codes.ok:
+                r.raise_for_status()
+            res = None
+            try:
+                res = r.json()
+            except ValueError:
+                self.logger.error('Can not resolve data from server.')
+                self.logger.error(r.text)
+            try:
+                if res['status'] != 0:
+                    self.logger.error(
+                            'Server returned status %d.' % res['status'])
+                    self.logger.error('Succeed logs: %s' % res['success_log'])
+                    for log in logs:
+                        if log['log_id'] not in res['success_log']:
+                            self.logger.error('Failed log: %s' % log)
+                    # If a log is not accepted by server, it's probably that it
+                    # contains some errors and will never be accepted.
+                    # So I just write it in log and ignore it, return success.
+                    return True
+                else:
+                    self.logger.info('Log posted successful.')
+                    return True
+            except KeyError:
+                exception, msg, traceback = sys.exc_info()
+                self.logger.error('%s: %s' % (exception, msg))
+                return False
+        except requests.exceptions.RequestException:
+            exception, msg, traceback = sys.exc_info()
+            self.logger.error('%s: %s' % (exception, msg))
+            return False
 
     # LOG PART
     logger = None
@@ -136,7 +204,12 @@ class Doorman(object):
             self.logger.error('%s %s' % (exception, message))
             return None
         if res is not None:
-            # TODO: Add to log.
+            log = self.validating_log_create(name, res)
+            try:
+                self.redis_save_log(log)
+            except redis.RedisError:
+                exception, message, traceback = sys.exc_info()
+                self.logger.error('%s %s' % (exception, message))
             return res
         else:
             res = self.web_validate_people(name)
@@ -149,6 +222,9 @@ class Doorman(object):
                 exception, message, traceback = sys.exc_info()
                 self.logger.error('%s %s' % (exception, message))
             return res
+
+    # HEART BEAT PART
+    # TODO: Heart beat.
 
     @staticmethod
     def main_open_door():

@@ -54,3 +54,12 @@ class TestDoorman(TestCase):
         d = Doorman()
         self.assertEqual(d.web_validate_people('Stranger'), False)
         return
+
+    def test_write_log(self):
+        d = Doorman()
+        d.main_validate('Someone not in cache')
+        self.assertEqual(d.validating_log_id, 1)
+        self.assertEqual(d.redis_server.exists(Doorman.LOG_LIST_NAME), True)
+        print 'This is the log:'
+        print d.redis_server.lindex(Doorman.LOG_LIST_NAME, 0)
+        return

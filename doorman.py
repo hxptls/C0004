@@ -16,6 +16,7 @@ import sys
 import redis
 import time
 import json
+import thread
 
 
 class Doorman(object):
@@ -58,6 +59,16 @@ class Doorman(object):
         else:
             return False
 
+    def redis_get_old_records(self):
+        old = []
+        for name in self.redis_server.keys():
+            if self.redis_server.ttl(name) < 60 * 60:
+                old.append(name)
+        return old
+
+    def redis_delete_people(self, name):
+        self.redis_server.delete(name)
+
     def redis_save_log(self, log):
         self.redis_server.rpush(self.LOG_LIST_NAME, log)
 
@@ -66,6 +77,9 @@ class Doorman(object):
         while self.redis_server.llen(self.LOG_LIST_NAME) > 0:
             res.append(self.redis_server.lpop(self.LOG_LIST_NAME))
         return res
+
+    def redis_get_log_count(self):
+        return self.redis_server.llen(self.LOG_LIST_NAME)
 
     # VALIDATING LOG PART
     validating_log_id = 0
@@ -87,8 +101,8 @@ class Doorman(object):
 
     def web_validate_people(self, name):
         url = self.API_URL + '/validate'
-        headers = \
-            {'X-Doorman': self.API_KEY, 'X-Doorman-Action': 'VALIDATE_CARD_NO'}
+        headers = {'X-Doorman': self.API_KEY,
+                   'X-Doorman-Action': 'VALIDATE_CARD_NO'}
         params = {'card_no': name}
         try:
             r = requests.get(url, headers=headers, params=params)
@@ -97,7 +111,7 @@ class Doorman(object):
             try:
                 result = r.json()
                 # FOR TEST
-                result['valid_card_no'] = ['Someone not in cache']
+                # result['valid_card_no'] = ['Someone not in cache']
                 # END TEST
                 if name in result['valid_card_no']:
                     return True
@@ -119,6 +133,17 @@ class Doorman(object):
             self.logger.error('%s %s' % (exception, message))
         return None
 
+    # Don't do anything with exceptions here.
+    def web_validate_old_records(self, names):
+        url = self.API_URL + '/validate'
+        headers = {'X-Doorman': self.API_KEY,
+                   'X-Doorman-Action': 'VALIDATE_CARD_NO'}
+        params = {'card_no': ','.join(names)}
+        r = requests.get(url, headers=headers, params=params)
+        if r.status_code != requests.codes.ok:
+            return None
+        return r.json()['valid_card_no']
+
     def web_post_log(self):
         try:
             logs = self.redis_get_all_logs()
@@ -128,7 +153,8 @@ class Doorman(object):
             return
         url = self.API_URL + '/log'
         headers = {'content-type': 'application/json',
-                   'X-Doorman': self.API_KEY, 'X-Doorman-Action': 'POST_LOG'}
+                   'X-Doorman': self.API_KEY,
+                   'X-Doorman-Action': 'POST_LOG'}
         data = {'count': len(logs), 'log': logs}
         try:
             r = requests.post(url, headers=headers, data=json.dumps(data))
@@ -164,6 +190,39 @@ class Doorman(object):
             self.logger.error('%s: %s' % (exception, msg))
             return False
 
+    def web_send_heart_beat(self):
+        url = self.API_URL + '/sys'
+        headers = {'X-Doorman': self.API_KEY, 'X-Doorman-Action': 'HEART_BEAT'}
+        data = {'client_time': str(time.time()),
+                'client_redis_status': 'OK',
+                'client_log_queue': self.redis_get_log_count()}
+        try:
+            r = requests.put(url, headers=headers, data=data)
+            result = None
+            try:
+                result = r.json()
+            except ValueError:
+                exception, msg, traceback = sys.exc_info()
+                self.logger.info('%s: %s' % (exception, msg))
+            try:
+                if result['status'] != 0:
+                    self.logger.error(
+                            'Server returned status: %d' % result['status'])
+                    self.logger.error('Server returned: %s' % r.text)
+                # Send a little earlier than expected doesn't hurt~
+                # And the net is slow, the daemon needs to sleep.
+                self.next_heart_beat = result['next_heart_beat'] - 2
+                self.delta_time += result['time_fix']
+            except KeyError:
+                exception, msg, traceback = sys.exc_info()
+                self.logger.info('%s: %s' % (exception, msg))
+        except requests.exceptions.RequestException:
+            exception, msg, traceback = sys.exc_info()
+            self.logger.info('%s: %s' % (exception, msg))
+        # If something goes wrong, `next_heart_beat` will not be changed and
+        # thus next heart beat will be sent immediately until one is succeed.
+        return
+
     # LOG PART
     logger = None
 
@@ -184,6 +243,9 @@ class Doorman(object):
         super(Doorman, self).__init__()
         self.redis_init()
         self.log_logger_init(logging.DEBUG)
+        # Multi-thread working
+        thread.start_new_thread(self.heart_beat_daemon, ())
+        thread.start_new_thread(self.expire_update_daemon, ())
 
     def main_loop(self):
         try:
@@ -191,6 +253,8 @@ class Doorman(object):
                 name = raw_input('Your name, please:')
                 if self.main_validate(name):
                     self.main_open_door()
+                if self.redis_get_log_count() > 0:
+                    self.web_post_log()
         except KeyboardInterrupt:
             self.logger.info('Keyboard interrupted.')
             self.logger.info('Exit.')
@@ -223,13 +287,46 @@ class Doorman(object):
                 self.logger.error('%s %s' % (exception, message))
             return res
 
-    # HEART BEAT PART
-    # TODO: Heart beat.
-
     @staticmethod
     def main_open_door():
         print 'The door is opened.'
         return
+
+    # HEART BEAT PART
+    # I still considered that the system time is difficult to change and change
+    # correctly. So the program will keep another timer based on system's.
+    delta_time = 0
+    next_heart_beat = time.time()
+
+    def heart_beat_daemon(self):
+        while True:
+            now = time.time() + self.delta_time
+            if now >= self.next_heart_beat:
+                self.web_send_heart_beat()
+            time.sleep(1)
+
+    # EXPIRE UPDATE PART
+    def expire_update_daemon(self):
+        while True:
+            # time.sleep(60 * 60)
+            try:
+                old_records = self.redis_get_old_records()
+                if not old_records:
+                    continue
+                still_valid = self.web_validate_old_records(old_records)
+                if still_valid is None:
+                    continue
+                for name in old_records:
+                    if name in still_valid:
+                        self.redis_add_welcomed_people(name)
+                    else:
+                        self.redis_delete_people(name)
+                        # It is almost impossible that this guy came to here in
+                        # 2 minutes after this action. So it's needless to add
+                        # it to forbidden.
+            except:
+                exception, message, traceback = sys.exc_info()
+                self.logger.error('%s %s' % (exception, message))
 
 
 if __name__ == '__main__':

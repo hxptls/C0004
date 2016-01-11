@@ -13,41 +13,57 @@
 import logging
 import requests
 import sys
-from redisco.containers import Set
+import redis
 
 
 class Doorman(object):
-    def __init__(self):
-        super(Doorman, self).__init__()
-        self.redis_init()
-        self.log_logger_init(logging.DEBUG)
-
     # REDIS PART
-    welcomed_people = None
-    forbidden_people = None
+    redis_server = None
+
+    WELCOMED_EXPIRE = 60 * 60 * 24 * 2
+    FORBIDDEN_EXPIRE = 60 * 2
+    WELCOMED_VALUE = 'welcome'
+    FORBIDDEN_VALUE = 'get out'
+    LOG_LIST_NAME = 'logs'
 
     def redis_init(self):
-        self.welcomed_people = Set('Welcomed people')
-        self.forbidden_people = Set('Forbidden people')
+        self.redis_server = redis.StrictRedis()
+        return
+
+    def redis_add_people(self, name, welcomed):
+        if welcomed:
+            self.redis_add_welcomed_people(name)
+        else:
+            self.redis_add_forbidden_people(name)
         return
 
     def redis_add_welcomed_people(self, name):
-        self.welcomed_people.add(name)
+        self.redis_server.setex(name, self.WELCOMED_EXPIRE, self.WELCOMED_VALUE)
         self.logger.debug('Added \"' + name + '\" to welcomed people set.')
         return
 
     def redis_add_forbidden_people(self, name):
-        self.forbidden_people.add(name)
+        self.redis_server.setex(name, self.FORBIDDEN_EXPIRE,
+                                self.FORBIDDEN_VALUE)
         self.logger.debug('Added \"' + name + '\" to forbidden people set.')
         return
 
     def redis_check_people(self, name):
-        if name in self.welcomed_people:
-            return True
-        elif name in self.forbidden_people:
-            return False
-        else:
+        if not self.redis_server.exists(name):
             return None
+        if self.redis_server.get(name) == self.WELCOMED_VALUE:
+            return True
+        else:
+            return False
+
+    def redis_save_log(self, log):
+        self.redis_server.rpush(self.LOG_LIST_NAME, log)
+
+    def redis_get_all_logs(self):
+        res = []
+        while self.redis_server.llen(self.LOG_LIST_NAME) > 0:
+            res.append(self.redis_server.lpop(self.LOG_LIST_NAME))
+        return res
 
     # WEB PART
     API_URL = 'https://op.tiaozhan.com/doorman/Home/Doorman'
@@ -94,3 +110,52 @@ class Doorman(object):
         logger.addHandler(file_handle)
         self.logger = logger
         return
+
+    # MAIN PART
+    def __init__(self):
+        super(Doorman, self).__init__()
+        self.redis_init()
+        self.log_logger_init(logging.DEBUG)
+
+    def main_loop(self):
+        try:
+            while True:
+                name = raw_input('Your name, please:')
+                if self.main_validate(name):
+                    self.main_open_door()
+        except KeyboardInterrupt:
+            self.logger.info('Keyboard interrupted.')
+            self.logger.info('Exit.')
+            return
+
+    def main_validate(self, name):
+        try:
+            res = self.redis_check_people(name)
+        except redis.RedisError:
+            exception, message, traceback = sys.exc_info()
+            self.logger.error('%s %s' % (exception, message))
+            return None
+        if res is not None:
+            # TODO: Add to log.
+            return res
+        else:
+            res = self.web_validate_people(name)
+            if res is None:
+                return None
+            # Try to write to cache first.
+            try:
+                self.redis_add_people(name, res)
+            except redis.RedisError:
+                exception, message, traceback = sys.exc_info()
+                self.logger.error('%s %s' % (exception, message))
+            return res
+
+    @staticmethod
+    def main_open_door():
+        print 'The door is opened.'
+        return
+
+
+if __name__ == '__main__':
+    d = Doorman()
+    d.main_loop()

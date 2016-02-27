@@ -172,7 +172,7 @@ class Doorman(object):
 
     # Don't do anything with exceptions here.
     # TODO: Maybe I should handle some errors here. The error is so bother me!
-    def web_validate_old_records(self, names):
+    def web_validate_old_records_classical(self, names):
         url = self.API_URL + '/validate'
         headers = {'X-Doorman': self.API_KEY,
                    'X-Doorman-Action': 'VALIDATE_CARD_NO'}

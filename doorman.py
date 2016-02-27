@@ -19,6 +19,7 @@ import json
 import thread
 
 
+# For info: function used to open the door is around line #292.
 class Doorman(object):
     # REDIS PART
     redis_server = None
@@ -99,6 +100,35 @@ class Doorman(object):
     API_URL = 'https://op.tiaozhan.com/doorman/Home/Doorman'
     API_KEY = 'Tiaozhan-Work'
 
+    # This is a new version of web API.
+    # For some stupid man who changed the logic of the server.
+    def web_validate_people_20160227(self, name):
+        url = self.API_URL + '/validate'
+        headers = {'X-Doorman': self.API_KEY,
+                   'X-Doorman-Action': 'VALIDATE_CARD_NO'}
+        params = {'card_no': name}
+        try:
+            r = requests.get(url, headers=headers, params=params)
+            if r.status_code != requests.codes.ok:
+                r.raise_for_status()
+            try:
+                result = r.json()
+                if result['status'] == 0:
+                    return True
+                else:
+                    return False
+            except ValueError:
+                self.logger.error('Can not resolve data from server.')
+                self.logger.error(r.text)
+            except KeyError:
+                self.logger.error(
+                        'Do not have necessary key in data from server.')
+                self.logger.error(r.text)
+        except requests.exceptions.RequestException:
+            exception, message, traceback = sys.exc_info()
+            self.logger.error('%s %s' % (exception, message))
+        return None
+
     def web_validate_people(self, name):
         url = self.API_URL + '/validate'
         headers = {'X-Doorman': self.API_KEY,
@@ -134,6 +164,7 @@ class Doorman(object):
         return None
 
     # Don't do anything with exceptions here.
+    # TODO: Maybe I should handle some errors here. The error is so bother me!
     def web_validate_old_records(self, names):
         url = self.API_URL + '/validate'
         headers = {'X-Doorman': self.API_KEY,
@@ -212,7 +243,9 @@ class Doorman(object):
                 # Send a little earlier than expected doesn't hurt~
                 # And the net is slow, the daemon needs to sleep.
                 self.next_heart_beat = result['next_heart_beat'] - 2
-                self.delta_time += result['time_fix']
+                # The server's time fix logic is unbelievable.
+                # TODO: Fix it.
+                # self.delta_time += result['time_fix']
             except KeyError:
                 exception, msg, traceback = sys.exc_info()
                 self.logger.info('%s: %s' % (exception, msg))
@@ -254,7 +287,11 @@ class Doorman(object):
                 if self.main_validate(name):
                     self.main_open_door()
                 if self.redis_get_log_count() > 0:
-                    self.web_post_log()
+                    # The server logic has been changed and I don't know what it
+                    #  is.
+                    # TODO: Fix it.
+                    # self.web_post_log()
+                    pass
         except KeyboardInterrupt:
             self.logger.info('Keyboard interrupted.')
             self.logger.info('Exit.')
@@ -276,7 +313,7 @@ class Doorman(object):
                 self.logger.error('%s %s' % (exception, message))
             return res
         else:
-            res = self.web_validate_people(name)
+            res = self.web_validate_people_20160227(name)
             if res is None:
                 return None
             # Try to write to cache first.
@@ -308,7 +345,8 @@ class Doorman(object):
     # EXPIRE UPDATE PART
     def expire_update_daemon(self):
         while True:
-            # time.sleep(60 * 60)
+            time.sleep(60 * 60)
+            # noinspection PyBroadException
             try:
                 old_records = self.redis_get_old_records()
                 if not old_records:

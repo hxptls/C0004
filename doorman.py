@@ -129,7 +129,7 @@ class Doorman(object):
             self.logger.error('%s %s' % (exception, message))
         return None
 
-    def web_validate_people(self, name):
+    def web_validate_people_classic(self, name):
         url = self.API_URL + '/validate'
         headers = {'X-Doorman': self.API_KEY,
                    'X-Doorman-Action': 'VALIDATE_CARD_NO'}
@@ -162,6 +162,13 @@ class Doorman(object):
             exception, message, traceback = sys.exc_info()
             self.logger.error('%s %s' % (exception, message))
         return None
+
+    def web_validate_old_records_20160227(self, names):
+        valid = []
+        for name in names:
+            if self.web_validate_people_20160227(name):
+                valid.append(name)
+        return valid
 
     # Don't do anything with exceptions here.
     # TODO: Maybe I should handle some errors here. The error is so bother me!
@@ -269,14 +276,16 @@ class Doorman(object):
         file_handle.setLevel(level)
         logger.addHandler(file_handle)
         self.logger = logger
+        self.logger.info('Added logger.')
         return
 
     # MAIN PART
     def __init__(self):
         super(Doorman, self).__init__()
         self.redis_init()
-        self.log_logger_init(logging.DEBUG)
+        self.log_logger_init(logging.WARNING)
         # Multi-thread working
+        self.logger.info('Making multi-threads...')
         thread.start_new_thread(self.heart_beat_daemon, ())
         thread.start_new_thread(self.expire_update_daemon, ())
 
@@ -345,13 +354,14 @@ class Doorman(object):
     # EXPIRE UPDATE PART
     def expire_update_daemon(self):
         while True:
-            time.sleep(60 * 60)
+            # time.sleep(60 * 60)
             # noinspection PyBroadException
             try:
+                self.logger.info('Asking expire...')
                 old_records = self.redis_get_old_records()
                 if not old_records:
                     continue
-                still_valid = self.web_validate_old_records(old_records)
+                still_valid = self.web_validate_old_records_20160227(old_records)
                 if still_valid is None:
                     continue
                 for name in old_records:
@@ -362,6 +372,7 @@ class Doorman(object):
                         # It is almost impossible that this guy came to here in
                         # 2 minutes after this action. So it's needless to add
                         # it to forbidden.
+                self.logger.info('Asked for expire.')
             except:
                 exception, message, traceback = sys.exc_info()
                 self.logger.error('%s %s' % (exception, message))

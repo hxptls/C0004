@@ -17,6 +17,7 @@ import redis
 import time
 import json
 import thread
+import GPIO.RPi as GPIO
 
 
 # For info: function used to open the door is around line #292.
@@ -288,6 +289,9 @@ class Doorman(object):
         self.logger.info('Making multi-threads...')
         thread.start_new_thread(self.heart_beat_daemon, ())
         thread.start_new_thread(self.expire_update_daemon, ())
+        # Set up RPi
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(25, GPIO.OUT)
 
     def main_loop(self):
         try:
@@ -336,6 +340,9 @@ class Doorman(object):
     @staticmethod
     def main_open_door():
         print 'The door is opened.'
+        GPIO.output(25,GPIO.HIGH)
+        time.sleep(1)
+        GPIO.output(25,GPIO.LOW)
         return
 
     # HEART BEAT PART
